@@ -1,185 +1,154 @@
 (function() {
   'use strict';
 
-  // State tracking
-  let videoElement = null;
-  let wasPlayingBeforePause = false;
-  let isAutoPaused = false;
-  let observerInstance = null;
-  let checkInterval = null;
+  const DEBUG = true; // Set to false to disable logs
 
-  // Find YouTube video element
-  function findVideoElement() {
-    // Primary YouTube video player
-    const primary = document.querySelector('video.html5-main-video');
-    if (primary) return primary;
+  let video = null;
+  let wasPlaying = false;
+  let autoPaused = false;
 
-    // Fallback: any video element on YouTube
-    const videos = document.querySelectorAll('video');
-    return videos.length > 0 ? videos[0] : null;
+  // Get video element
+  function getVideo() {
+    if (video && document.contains(video)) return video;
+    
+    video = document.querySelector('video.html5-main-video') || 
+            document.querySelector('video.video-stream') ||
+            document.querySelector('video');
+    
+    return video;
   }
 
-  // Initialize video monitoring
-  function initializeVideoMonitoring() {
-    videoElement = findVideoElement();
+  // Check if YouTube settings/menu is open
+  function isSettingsOpen() {
+    const settings = document.querySelector('.ytp-settings-menu');
+    if (settings) {
+      const style = window.getComputedStyle(settings);
+      return style.display !== 'none';
+    }
+    return false;
+  }
+
+  // Pause video
+  function pauseVideo() {
+    const v = getVideo();
+    if (!v || v.paused) return;
     
-    if (!videoElement) {
-      // Retry after DOM updates
-      if (!checkInterval) {
-        checkInterval = setInterval(() => {
-          videoElement = findVideoElement();
-          if (videoElement) {
-            clearInterval(checkInterval);
-            checkInterval = null;
-            attachVideoListeners();
-          }
-        }, 500);
-        
-        // Stop checking after 10 seconds
-        setTimeout(() => {
-          if (checkInterval) {
-            clearInterval(checkInterval);
-            checkInterval = null;
-          }
-        }, 10000);
-      }
+    // Don't pause if settings menu is open
+    if (isSettingsOpen()) {
+      if (DEBUG) console.log('⏭️ Skipped pause - settings open');
       return;
     }
-
-    attachVideoListeners();
-  }
-
-  // Attach event listeners to video element
-  function attachVideoListeners() {
-    if (!videoElement) return;
-
-    // Track manual play/pause by user
-    videoElement.addEventListener('play', () => {
-      if (!isAutoPaused) {
-        wasPlayingBeforePause = true;
-        notifyBackgroundState(true, false);
-      }
-    });
-
-    videoElement.addEventListener('pause', () => {
-      if (!isAutoPaused) {
-        wasPlayingBeforePause = false;
-        notifyBackgroundState(false, false);
-      }
-    });
-
-    // Use MutationObserver for dynamic video element changes
-    setupMutationObserver();
-  }
-
-  // Setup observer for DOM changes (YouTube's SPA navigation)
-  function setupMutationObserver() {
-    if (observerInstance) {
-      observerInstance.disconnect();
-    }
-
-    observerInstance = new MutationObserver((mutations) => {
-      const currentVideo = findVideoElement();
-      if (currentVideo && currentVideo !== videoElement) {
-        videoElement = currentVideo;
-        attachVideoListeners();
-      }
-    });
-
-    observerInstance.observe(document.body, {
-      childList: true,
-      subtree: true
-    });
-  }
-
-  // Pause video (auto-pause)
-  function autoPauseVideo() {
-    if (!videoElement) return;
     
-    if (!videoElement.paused) {
-      wasPlayingBeforePause = true;
-      isAutoPaused = true;
-      videoElement.pause();
-      notifyBackgroundState(false, true);
-    }
-  }
-
-  // Resume video (auto-resume)
-  function autoResumeVideo() {
-    if (!videoElement) return;
+    wasPlaying = true;
+    autoPaused = true;
+    v.pause();
     
-    if (wasPlayingBeforePause && isAutoPaused) {
-      isAutoPaused = false;
-      videoElement.play().catch(() => {
-        // Auto-play blocked - respect browser policy
-        wasPlayingBeforePause = false;
-      });
-      notifyBackgroundState(true, false);
-    }
+    if (DEBUG) console.log('⏸️ Paused');
   }
 
-  // Handle visibility changes using Page Visibility API
-  function handleVisibilityChange() {
+  // Resume video
+  function resumeVideo() {
+    const v = getVideo();
+    if (!v || !wasPlaying || !autoPaused) return;
+    
+    // Don't resume if settings menu is open
+    if (isSettingsOpen()) {
+      if (DEBUG) console.log('⏭️ Skipped resume - settings open');
+      return;
+    }
+    
+    autoPaused = false;
+    
+    // Wait a moment before playing to avoid blank screen
+    setTimeout(() => {
+      if (v && v.paused) {
+        v.play()
+          .then(() => {
+            if (DEBUG) console.log('▶️ Resumed');
+          })
+          .catch(() => {
+            wasPlaying = false;
+            if (DEBUG) console.log('⚠️ Play blocked');
+          });
+      }
+    }, 100);
+  }
+
+  // Track user play/pause
+  function attachListeners() {
+    const v = getVideo();
+    if (!v) return;
+    
+    v.addEventListener('play', () => {
+      if (!autoPaused) {
+        wasPlaying = true;
+        if (DEBUG) console.log('User played');
+      }
+    }, { passive: true });
+    
+    v.addEventListener('pause', () => {
+      if (!autoPaused) {
+        wasPlaying = false;
+        if (DEBUG) console.log('User paused');
+      }
+    }, { passive: true });
+    
+    if (DEBUG) console.log('✅ Listeners attached');
+  }
+
+  // Handle visibility change
+  function onVisibilityChange() {
     if (document.hidden) {
-      autoPauseVideo();
+      pauseVideo();
     } else {
-      autoResumeVideo();
+      resumeVideo();
     }
   }
 
-  // Notify background script of video state
-  function notifyBackgroundState(isPlaying, wasAutoPaused) {
-    chrome.runtime.sendMessage({
-      action: "VIDEO_STATE_CHANGED",
-      isPlaying,
-      wasAutoPaused
-    }).catch(() => {});
+  // Initialize
+  function init() {
+    const v = getVideo();
+    if (v) {
+      attachListeners();
+      if (!v.paused) wasPlaying = true;
+    }
   }
 
-  // Message handler from background script
-  chrome.runtime.onMessage.addListener((message) => {
-    switch (message.action) {
-      case "TAB_FOCUSED":
-      case "WINDOW_FOCUSED":
-        autoResumeVideo();
-        break;
+  // Find video with retry
+  let attempts = 0;
+  const findVideo = setInterval(() => {
+    if (getVideo()) {
+      clearInterval(findVideo);
+      init();
+      if (DEBUG) console.log('✅ Video found');
+    }
+    if (++attempts > 20) clearInterval(findVideo);
+  }, 200);
+
+  // Visibility API - main trigger
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
+  // Window focus/blur - backup
+  window.addEventListener('blur', pauseVideo, { passive: true });
+  window.addEventListener('focus', resumeVideo, { passive: true });
+
+  // Handle YouTube navigation
+  let currentUrl = location.href;
+  setInterval(() => {
+    if (location.href !== currentUrl) {
+      currentUrl = location.href;
+      wasPlaying = false;
+      autoPaused = false;
+      video = null;
       
-      case "TAB_UNFOCUSED":
-      case "WINDOW_UNFOCUSED":
-        autoPauseVideo();
-        break;
+      setTimeout(() => {
+        if (getVideo()) init();
+      }, 500);
       
-      case "INIT":
-        initializeVideoMonitoring();
-        break;
+      if (DEBUG) console.log('🔄 Page changed');
     }
-  });
+  }, 1000);
 
-  // Page Visibility API listener
-  document.addEventListener('visibilitychange', handleVisibilityChange);
-
-  // Window focus/blur listeners (additional layer)
-  window.addEventListener('blur', autoPauseVideo);
-  window.addEventListener('focus', autoResumeVideo);
-
-  // Initialize on load
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initializeVideoMonitoring);
-  } else {
-    initializeVideoMonitoring();
-  }
-
-  // YouTube SPA navigation detection
-  let lastUrl = location.href;
-  new MutationObserver(() => {
-    const currentUrl = location.href;
-    if (currentUrl !== lastUrl) {
-      lastUrl = currentUrl;
-      // Reset state on navigation
-      wasPlayingBeforePause = false;
-      isAutoPaused = false;
-      initializeVideoMonitoring();
-    }
-  }).observe(document, { subtree: true, childList: true });
+  if (DEBUG) console.log('🚀 Extension loaded');
 
 })();
